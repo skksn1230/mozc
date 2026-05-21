@@ -53,6 +53,9 @@
 #include "rewriter/language_aware_rewriter.h"
 #include "rewriter/number_rewriter.h"
 #include "rewriter/remove_redundant_candidate_rewriter.h"
+#include "rewriter/neural_cost_rewriter.h"
+#include "rewriter/stub_neural_scorer.h"   // フェーズ1: スタブ
+// #include "rewriter/onnx_neural_scorer.h" // フェーズ2: ONNX版に差し替え
 #include "rewriter/single_kanji_rewriter.h"
 #include "rewriter/small_letter_rewriter.h"
 #include "rewriter/symbol_rewriter.h"
@@ -195,6 +198,13 @@ Rewriter::Rewriter(const engine::Modules& modules) {
   AddRewriter(make_unique_from_tuples<EnvironmentalFilterRewriter>(
       data_manager.GetEmojiRewriterData()));
   AddRewriter(std::make_unique<RemoveRedundantCandidateRewriter>());
+  // ニューラルかな漢字変換コスト補正
+  // フェーズ1: スタブ（コスト変化なし）で枠組みの動作確認
+  AddRewriter(std::make_unique<NeuralCostRewriter>(
+    std::make_unique<StubNeuralScorer>()));
+  // フェーズ2: ONNX版に差し替え
+  // AddRewriter(std::make_unique<NeuralCostRewriter>(
+  //     std::make_unique<OnnxNeuralScorer>(GetModelPath("neural_kana_kanji.onnx"))));
   AddRewriter(make_unique_from_tuples<A11yDescriptionRewriter>(
       data_manager.GetA11yDescriptionRewriterData()));
 }
