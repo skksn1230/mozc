@@ -1,4 +1,3 @@
-// src/rewriter/neural_cost_rewriter.cc
 #include "rewriter/neural_cost_rewriter.h"
 
 #include <algorithm>
@@ -19,8 +18,6 @@ NeuralCostRewriter::NeuralCostRewriter(
 
 int NeuralCostRewriter::capability(
     const ConversionRequest& request) const {
-  // CONVERSION のみ対象。
-  // PREDICTION（Tab補完）は候補数が多く、ニューラルの恩恵も薄いため除外。
   return RewriterInterface::CONVERSION;
 }
 
@@ -45,7 +42,7 @@ bool NeuralCostRewriter::RewriteSegment(Segment* segment) const {
     return false;
   }
 
-  // スコアリング対象の候補を収集（上位 kMaxCandidatesToScore 件のみ）
+  // 上位 kMaxCandidatesToScore 件のみスコアリング
   const int score_count = std::min(candidates_size, kMaxCandidatesToScore);
   std::vector<absl::string_view> values;
   values.reserve(score_count);
@@ -53,31 +50,27 @@ bool NeuralCostRewriter::RewriteSegment(Segment* segment) const {
     values.push_back(segment->candidate(i).value);
   }
 
-  // ニューラルスコアを取得
-  const std::vector<NeuralScorerInterface::ScoredCandidate> scored =
-      scorer_->Score(segment->key(), values);
+  const auto scored = scorer_->Score(segment->key(), values);
 
-  if (scored.size() != values.size()) {
+  if (static_cast<int>(scored.size()) != score_count) {
     LOG(ERROR) << "NeuralScorer returned unexpected size";
     return false;
   }
 
   // コスト補正を適用
-  // Mozcの候補コストは「小さいほど良い」。
-  // ニューラルスコアは「大きいほど良い」なので、符号を反転して加算する。
   //
-  // 補正式:
   //   new_cost = original_cost + round(-neural_score * kScoreToMozcCost * kNeuralWeight)
   //
-  // 例: neural_score = 1.5（他の候補より明らかに良い）の場合
-  //   delta = -1.5 * 200.0 * 0.25 = -75
-  //   コストが75下がり、順位が上がりやすくなる
+  // Mozcのコストは「小さいほど良い」
+  // ニューラルスコアは「大きいほど良い」→ 符号を反転して加算
+  //
+  // 発散防止: delta を [-300, +300] にクリップ
   bool cost_changed = false;
   for (int i = 0; i < score_count; ++i) {
     Segment::Candidate* cand = segment->mutable_candidate(i);
     const float delta_f =
         -scored[i].neural_score * kScoreToMozcCost * kNeuralWeight;
-    const int delta = static_cast<int>(delta_f);
+    const int delta = std::clamp(static_cast<int>(delta_f), -300, 300);
     if (delta != 0) {
       cand->cost += delta;
       cost_changed = true;
@@ -88,8 +81,7 @@ bool NeuralCostRewriter::RewriteSegment(Segment* segment) const {
     return false;
   }
 
-  // コスト変更後に再ソート
-  // Segment::sort_candidates_by_cost() は cost 昇順でソートする
+  // コスト変更後に再ソート（cost 昇順）
   segment->sort_candidates_by_cost();
   return true;
 }
