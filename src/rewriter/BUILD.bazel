@@ -1738,3 +1738,30 @@ mozc_cc_test(
         "//testing:gunit_main",
     ],
 )
+
+# src/rewriter/BUILD.bazel に追加
+mozc_cc_library(
+    name = "neural_scorer_interface",
+    hdrs = ["neural_scorer_interface.h"],
+    deps = ["@com_google_absl//absl/strings"],
+)
+
+mozc_cc_library(
+    name = "stub_neural_scorer",
+    hdrs = ["stub_neural_scorer.h"],
+    deps = [":neural_scorer_interface"],
+)
+
+mozc_cc_library(
+    name = "neural_cost_rewriter",
+    srcs = ["neural_cost_rewriter.cc"],
+    hdrs = ["neural_cost_rewriter.h"],
+    deps = [
+        ":neural_scorer_interface",
+        ":rewriter_interface",
+        "//converter:segments",
+        "//request:conversion_request",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/strings",
+    ],
+)
