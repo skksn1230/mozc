@@ -1,6 +1,7 @@
 #include "rewriter/neural_cost_rewriter.h"
 
 #include <algorithm>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -46,6 +47,7 @@ bool NeuralCostRewriter::RewriteSegment(converter::Segment* segment) const {
 
   const int score_count = std::min(candidates_size, kMaxCandidatesToScore);
 
+  // スコアリング対象の候補の value を収集
   std::vector<absl::string_view> values;
   values.reserve(score_count);
   for (int i = 0; i < score_count; ++i) {
@@ -53,64 +55,88 @@ bool NeuralCostRewriter::RewriteSegment(converter::Segment* segment) const {
   }
 
   const auto scored = scorer_->Score(segment->key(), values);
-
   if (static_cast<int>(scored.size()) != score_count) {
     LOG(ERROR) << "NeuralScorer returned unexpected size: " << scored.size()
                << " (expected " << score_count << ")";
     return false;
   }
 
-  // -----------------------------------------------------------------------
-  // コスト補正を各候補に書き込む
+  // ------------------------------------------------------------------
+  // Step 1: Mozcのオリジナルコストに delta を加算する
   //
-  //   new_cost = original_cost
-  //            + clamp(round(-neural_score * kScoreToMozcCost * kNeuralWeight),
-  //                    -300, +300)
+  //   delta = clamp( round(-neural_score * kScoreToMozcCost * kNeuralWeight),
+  //                  -300, +300 )
   //
-  // Mozcのコストは「小さいほど良い」
-  // ニューラルスコアは「大きいほど良い」→ 符号を反転して加算
-  // -----------------------------------------------------------------------
-  std::vector<std::pair<int /*new_cost*/, int /*original_idx*/>> order;
-  order.reserve(score_count);
-
+  //   new_cost = original_cost + delta
+  //
+  // Mozcのコストは「小さいほど良い」、neural_score は「大きいほど良い」
+  // → 符号を反転して加算することで、Mozcの既存コスト計算を
+  //   ニューラルスコアが増減させる形になる
+  // ------------------------------------------------------------------
+  bool cost_changed = false;
   for (int i = 0; i < score_count; ++i) {
-    converter::Candidate* cand = segment->mutable_candidate(i);
     const float delta_f =
         -scored[i].neural_score * kScoreToMozcCost * kNeuralWeight;
     const int delta = std::clamp(static_cast<int>(delta_f), -300, 300);
-    cand->cost += delta;
-    order.push_back({cand->cost, i});
-  }
-
-  // -----------------------------------------------------------------------
-  // Segment には sort_candidates_by_cost() が存在しないため、
-  // コスト補正後の順位を計算し、move_candidate() で並び替える。
-  //
-  // move_candidate(old_idx, new_idx) は候補を old_idx から new_idx へ移動する。
-  // 先頭から1つずつ「正しい候補」を持ってくる挿入ソート相当の操作で実現する。
-  // -----------------------------------------------------------------------
-  std::stable_sort(order.begin(), order.end(),
-                   [](const auto& a, const auto& b) {
-                     return a.first < b.first;  // cost 昇順
-                   });
-
-  bool cost_changed = false;
-  for (int new_idx = 0; new_idx < score_count; ++new_idx) {
-    const int old_idx = order[new_idx].second;
-    if (old_idx != new_idx) {
-      segment->move_candidate(old_idx, new_idx);
-      // move_candidate で候補が挿入されるため、
-      // 後続の order エントリの old_idx を補正する
-      for (int j = new_idx + 1; j < score_count; ++j) {
-        if (order[j].second >= new_idx && order[j].second < old_idx) {
-          ++order[j].second;
-        }
-      }
+    if (delta != 0) {
+      segment->mutable_candidate(i)->cost += delta;
       cost_changed = true;
     }
   }
 
-  return cost_changed;
+  if (!cost_changed) {
+    return false;
+  }
+
+  // ------------------------------------------------------------------
+  // Step 2: コスト補正後の上位 score_count 件を cost 昇順に安定ソートする
+  //
+  // move_candidate(old_idx, new_idx) は
+  //   「old_idx の要素を取り出して new_idx に挿入する」動作。
+  //
+  // 先頭 (new_idx=0) から1件ずつ「あるべき候補」を持ってくる
+  // 選択ソート相当の操作で実現する。
+  //
+  // move_candidate(cur_pos → new_idx) を実行すると、
+  //   cur_pos > new_idx のとき: [new_idx, cur_pos) の要素が1つ後ろにずれる
+  //   cur_pos < new_idx のとき: (cur_pos, new_idx] の要素が1つ前にずれる
+  // この両方のケースを正しく indices に反映する。
+  // ------------------------------------------------------------------
+  std::vector<int> indices(score_count);
+  std::iota(indices.begin(), indices.end(), 0);
+  std::stable_sort(indices.begin(), indices.end(), [&](int a, int b) {
+    return segment->candidate(a).cost < segment->candidate(b).cost;
+  });
+
+  for (int new_idx = 0; new_idx < score_count; ++new_idx) {
+    const int cur_pos = indices[new_idx];
+    if (cur_pos == new_idx) {
+      continue;
+    }
+
+    segment->move_candidate(cur_pos, new_idx);
+
+    // move_candidate 後のインデックスずれを補正する
+    if (cur_pos > new_idx) {
+      // cur_pos から new_idx へ「手前に」移動した場合:
+      // [new_idx, cur_pos) にあった要素が1つ後ろにずれる
+      for (int j = new_idx + 1; j < score_count; ++j) {
+        if (indices[j] >= new_idx && indices[j] < cur_pos) {
+          ++indices[j];
+        }
+      }
+    } else {
+      // cur_pos から new_idx へ「後ろに」移動した場合:
+      // (cur_pos, new_idx] にあった要素が1つ前にずれる
+      for (int j = new_idx + 1; j < score_count; ++j) {
+        if (indices[j] > cur_pos && indices[j] <= new_idx) {
+          --indices[j];
+        }
+      }
+    }
+  }
+
+  return true;
 }
 
 }  // namespace mozc
