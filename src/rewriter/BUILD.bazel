@@ -80,6 +80,8 @@ mozc_cc_library(
     deps = [
         ":collocation_util",
         ":rewriter_interface",
+        ":neural_cost_rewriter",    # ← 追加
+        ":stub_neural_scorer",      # ← フェーズ1のみ
         "//base:bits",
         "//base:util",
         "//base:vlog",
